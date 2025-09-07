@@ -58,11 +58,45 @@ If `val.json` is missing at train time, `train.py` will auto-split `train.json` 
 
 ## Train
 
-Adjust training settings at the top of `train.py` (e.g., `EPOCHS`, `BATCH_SIZE`, `NUM_CLASSES`).
+`train.py` supports CLI hyperparameters, so you don’t need to edit code.
 
-Train both included backbones (Swin Tiny and ConvNeXt Tiny):
+- Train both included backbones (Swin Tiny and ConvNeXt Tiny):
 ```
-python train.py
+python train.py \
+  --img-root dataset \
+  --train-json dataset/COCO/annotations/train.json \
+  --val-json dataset/COCO/annotations/val.json \
+  --epochs 1 \
+  --batch-size 8 \
+  --img-size 640 \
+  --lr 1e-3 \
+  --weight-decay 0.05 \
+  --num-classes 1 \
+  --workers 8 \
+  --device auto \
+  --backbones swin_tiny_patch4_window7_224 convnext_tiny \
+  --focal-alpha 0.25 \
+  --focal-gamma 2.0 \
+  --eval-iou-thr 0.5 \
+  --nms-iou 0.6
+```
+
+Common options:
+```
+  --epochs INT                number of training epochs
+  --batch-size INT            training/validation batch size
+  --img-size INT              image size used by transforms/backbone
+  --lr FLOAT                  AdamW learning rate
+  --weight-decay FLOAT        AdamW weight decay
+  --num-classes INT           number of classes in dataset
+  --workers INT               dataloader workers
+  --device {auto,cpu,cuda}    select device (auto picks CUDA if available)
+  --backbones NAMES...        one or more timm backbones to train
+  --pretrained/--no-pretrained  enable/disable pretrained backbone (default: enabled)
+  --focal-alpha FLOAT         focal loss alpha (default 0.25)
+  --focal-gamma FLOAT         focal loss gamma (default 2.0)
+  --eval-iou-thr FLOAT        IoU threshold for mAP@0.5 computation
+  --nms-iou FLOAT             IoU used by NMS in evaluation
 ```
 
 During training, checkpoints are saved to:
@@ -115,11 +149,17 @@ runs/<backbone>/metrics/test_last/
 
 To train 4 classes (`no`, `light`, `moderate`, `heavy`) based on occlusion:
 - Set `USE_OCCLUSION_AS_CLASS = True` in `data/eurocity_to_coco.py` and reconvert the dataset.
-- Set `NUM_CLASSES = 4` in `train.py` before training.
+- Pass `--num-classes 4` to `train.py` when training.
 
 ## Notes & Tips
 
-- Device: training uses AMP on CUDA automatically; otherwise runs on CPU (slower). You can adjust `device` logic in `train_one` if needed.
+- Device: training uses AMP on CUDA automatically; otherwise runs on CPU (slower). Select with `--device`.
 - Dataloader: increase `--workers` for faster data loading; `pin_memory` is enabled only when on CUDA.
 - Normalization: current transforms scale to `[0,1]`. You may add mean/std normalization in `data/transforms.py` for timm backbones.
 
+## Hyperparameters at a Glance
+
+- Optimizer: AdamW (`--lr`, `--weight-decay`)
+- Loss: Focal Loss (`--focal-alpha`, `--focal-gamma`)
+- Image size/augs: `--img-size` (see `data/transforms.py` for aug ops/probabilities)
+- Evaluation thresholds: `--eval-iou-thr` and `--nms-iou`

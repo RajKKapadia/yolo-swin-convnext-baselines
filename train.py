@@ -1,4 +1,5 @@
 import os
+import argparse
 from pathlib import Path
 
 import torch
@@ -12,24 +13,12 @@ from utils.losses import FocalLoss, giou_loss
 from utils.metrics import evaluate_map50_aucroc
 
 
-# ---------- CONFIG (adjust if needed) ----------
-IMG_ROOT = Path(
-    "dataset"
-)  # because file_name in COCO is like "EuroCityPersons/prague/xxx.png"
+# Default paths
+IMG_ROOT = Path("dataset")  # because file_name in COCO is like "EuroCityPersons/prague/xxx.png"
 ANN_DIR = IMG_ROOT / "COCO" / "annotations"
 TRAIN_JSON = ANN_DIR / "train.json"
-VAL_JSON = ANN_DIR / "val.json"  # will be created if missing
+VAL_JSON = ANN_DIR / "val.json"
 RUNS_DIR = Path("runs")
-
-EPOCHS = 1
-BATCH_SIZE = 8
-IMG_SIZE = 640
-LR = 1e-3
-NUM_CLASSES = 1  # set to 4 if you encoded occlusion as classes
-NUM_WORKERS = min(8, os.cpu_count() or 4)
-VAL_SPLIT = 0.1
-RANDOM_SEED = 42
-# ----------------------------------------------
 
 
 def generate_grid(h, w, stride, device):
@@ -93,58 +82,76 @@ def assign_targets(cls_outs, reg_outs, targets, strides=(8, 16, 32), num_classes
     return cls_tgts, box_tgts, mask_pos
 
 
-def train_one(backbone_name: str, device: str = None):
-    # device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    device = "cpu"
-
+def train_one(
+    backbone_name: str,
+    img_root: Path,
+    train_json: Path,
+    val_json: Path,
+    runs_dir: Path,
+    epochs: int,
+    batch_size: int,
+    img_size: int,
+    lr: float,
+    weight_decay: float,
+    num_classes: int,
+    num_workers: int,
+    device: str,
+    focal_alpha: float,
+    focal_gamma: float,
+    eval_iou_thr: float,
+    eval_nms_iou: float,
+    pretrained: bool,
+):
     model = TIMMYolo(
-        backbone_name=backbone_name, num_classes=NUM_CLASSES, pretrained=True
+        backbone_name=backbone_name,
+        num_classes=num_classes,
+        pretrained=pretrained,
+        img_size=img_size,
     ).to(device)
 
     train_ds = CocoLikeDataset(
-        str(IMG_ROOT), str(TRAIN_JSON), transforms=get_train_transforms(IMG_SIZE)
+        str(img_root), str(train_json), transforms=get_train_transforms(img_size)
     )
     val_ds = CocoLikeDataset(
-        str(IMG_ROOT), str(VAL_JSON), transforms=get_val_transforms(IMG_SIZE)
+        str(img_root), str(val_json), transforms=get_val_transforms(img_size)
     )
 
+    pin = device == "cuda"
     train_dl = DataLoader(
         train_ds,
-        batch_size=BATCH_SIZE,
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=NUM_WORKERS,
+        num_workers=num_workers,
         collate_fn=collate_fn,
-        pin_memory=True,
+        pin_memory=pin,
     )
     val_dl = DataLoader(
         val_ds,
-        batch_size=BATCH_SIZE,
+        batch_size=batch_size,
         shuffle=False,
-        num_workers=NUM_WORKERS,
+        num_workers=num_workers,
         collate_fn=collate_fn,
-        pin_memory=True,
+        pin_memory=pin,
     )
 
-    optim = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.05)
-    cls_loss_fn = FocalLoss()
-    # Use new torch.amp GradScaler API (replaces torch.cuda.amp.GradScaler)
+    optim = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    cls_loss_fn = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
     scaler = torch.amp.GradScaler(enabled=(device == "cuda"))
 
-    save_dir = RUNS_DIR / backbone_name
+    save_dir = runs_dir / backbone_name
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    for epoch in range(1, EPOCHS + 1):
+    for epoch in range(1, epochs + 1):
         model.train()
-        pbar = tqdm(train_dl, desc=f"[{backbone_name}] epoch {epoch}/{EPOCHS}")
+        pbar = tqdm(train_dl, desc=f"[{backbone_name}] epoch {epoch}/{epochs}")
         avg_loss = 0.0
 
         for imgs, targets in pbar:
             imgs = imgs.to(device)
-            # Use new torch.amp.autocast API (replaces torch.cuda.amp.autocast)
             with torch.amp.autocast(device_type="cuda", enabled=(device == "cuda")):
                 cls_outs, reg_outs = model(imgs)
                 cls_tgts, box_tgts, mask_pos = assign_targets(
-                    cls_outs, reg_outs, targets, num_classes=NUM_CLASSES
+                    cls_outs, reg_outs, targets, num_classes=num_classes
                 )
 
                 cls_loss, reg_loss = 0.0, 0.0
@@ -178,8 +185,8 @@ def train_one(backbone_name: str, device: str = None):
             val_dl=val_dl,
             device=device,
             save_dir=metrics_dir,
-            iou_thr=0.5,
-            nms_iou=0.6,
+            iou_thr=eval_iou_thr,
+            nms_iou=eval_nms_iou,
         )
         print(
             f"[val] mAP@0.5: {metrics['mAP50']:.4f} | AUC-ROC: {metrics['AUC_ROC']:.4f}"
@@ -191,8 +198,86 @@ def train_one(backbone_name: str, device: str = None):
     print(f"✅ finished: {backbone_name}. checkpoints in: {save_dir}")
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train TIMMYolo with configurable hyperparameters")
+    parser.add_argument("--img-root", type=str, default=str(IMG_ROOT), help="Image root directory")
+    parser.add_argument("--train-json", type=str, default=str(TRAIN_JSON), help="Path to COCO train.json")
+    parser.add_argument("--val-json", type=str, default=str(VAL_JSON), help="Path to COCO val.json")
+    parser.add_argument("--runs-dir", type=str, default=str(RUNS_DIR), help="Output runs directory")
+
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--img-size", type=int, default=640)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=0.05)
+    parser.add_argument("--num-classes", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 4))
+    parser.add_argument("--seed", type=int, default=42)
+
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Device selection")
+    parser.add_argument(
+        "--backbones",
+        type=str,
+        nargs="+",
+        default=["swin_tiny_patch4_window7_224", "convnext_tiny"],
+        help="One or more timm backbone names",
+    )
+    # Pretrained flag (enabled by default); use --no-pretrained to disable
+    parser.add_argument("--pretrained", dest="pretrained", action="store_true")
+    parser.add_argument("--no-pretrained", dest="pretrained", action="store_false")
+    parser.set_defaults(pretrained=True)
+
+    # Loss
+    parser.add_argument("--focal-alpha", type=float, default=0.25)
+    parser.add_argument("--focal-gamma", type=float, default=2.0)
+
+    # Evaluation / NMS thresholds
+    parser.add_argument("--eval-iou-thr", type=float, default=0.5, help="IoU threshold for mAP50 evaluation")
+    parser.add_argument("--nms-iou", type=float, default=0.6, help="IoU for NMS during evaluation")
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    # Device resolution
+    if args.device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = args.device
+    print(f"Device: {device}")
+
+    # Seeding (basic)
+    torch.manual_seed(args.seed)
+
+    img_root = Path(args.img_root)
+    train_json = Path(args.train_json)
+    val_json = Path(args.val_json)
+    runs_dir = Path(args.runs_dir)
+
+    for backbone in args.backbones:
+        train_one(
+            backbone_name=backbone,
+            img_root=img_root,
+            train_json=train_json,
+            val_json=val_json,
+            runs_dir=runs_dir,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            img_size=args.img_size,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            num_classes=args.num_classes,
+            num_workers=args.workers,
+            device=device,
+            focal_alpha=args.focal_alpha,
+            focal_gamma=args.focal_gamma,
+            eval_iou_thr=args.eval_iou_thr,
+            eval_nms_iou=args.nms_iou,
+            pretrained=args.pretrained,
+        )
+
+
 if __name__ == "__main__":
-    # 1) SWIN baseline
-    train_one("swin_tiny_patch4_window7_224")
-    # 2) ConvNeXt baseline
-    train_one("convnext_tiny")
+    main()

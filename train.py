@@ -63,8 +63,10 @@ def assign_targets(cls_outs, reg_outs, targets, strides=(8, 16, 32), num_classes
                 pos_m[b, 0] = pos[0]
 
                 best_labels = labels[best_idx.squeeze(0)]
+                # one-hot only on positive locations; keep background as zeros
                 cls_hot = torch.zeros((num_classes, H, W), device=device)
                 cls_hot.scatter_(0, best_labels[None, :, :], 1.0)
+                cls_hot = cls_hot * pos[0].float().unsqueeze(0)
                 cls_t[b] = cls_hot
 
                 xx1 = x1.squeeze(0)[best_idx.squeeze(0)]

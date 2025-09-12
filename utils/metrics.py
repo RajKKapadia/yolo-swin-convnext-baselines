@@ -28,9 +28,15 @@ def _postprocess_logits(
             scores, labels = cl_b.max(dim=0)  # [HW], [HW]
             keep = scores > conf_thres
             if keep.any():
-                all_boxes.append(rg_b[keep])
-                all_scores.append(scores[keep])
-                all_labels.append(labels[keep])
+                boxes_k = rg_b[keep]
+                scores_k = scores[keep]
+                labels_k = labels[keep]
+                # filter out non-finite values to avoid NaNs/Inf propagating
+                finite = torch.isfinite(boxes_k).all(dim=1) & torch.isfinite(scores_k)
+                if finite.any():
+                    all_boxes.append(boxes_k[finite])
+                    all_scores.append(scores_k[finite])
+                    all_labels.append(labels_k[finite])
         if len(all_boxes) == 0:
             preds.append(
                 (
@@ -201,7 +207,7 @@ def evaluate_map50_aucroc(
 
         for b, (boxes, scores, labels) in enumerate(batch_preds):
             # GT for this image
-            gt_boxes = targets[b]["boxes"]  # tensor [Ng,4] on CPU
+            gt_boxes = targets[b]["boxes"].detach().cpu()  # tensor [Ng,4] on CPU
             gt_labels = targets[b]["labels"]  # tensor [Ng]
             if gt_boxes.numel() > 0:
                 for lb, bx in zip(gt_labels.tolist(), gt_boxes):
@@ -217,13 +223,15 @@ def evaluate_map50_aucroc(
 
             # ROC bookkeeping (global): label detection as positive if IoU>=thr to ANY GT (any class)
             if boxes.numel() > 0:
+                boxes_cpu = boxes.detach().cpu()
+                scores_cpu = scores.detach().cpu()
                 if gt_boxes.numel() > 0:
-                    ious = _box_iou(boxes.cpu(), gt_boxes)  # [Nd, Ng]
+                    ious = _box_iou(boxes_cpu, gt_boxes)  # [Nd, Ng]
                     best_iou, _ = ious.max(dim=1)
                     is_pos = (best_iou.numpy() >= iou_thr).astype(np.int32)
                 else:
-                    is_pos = np.zeros((boxes.shape[0],), dtype=np.int32)
-                all_scores.extend([float(s) for s in scores.cpu().numpy().tolist()])
+                    is_pos = np.zeros((boxes_cpu.shape[0],), dtype=np.int32)
+                all_scores.extend([float(s) for s in scores_cpu.numpy().tolist()])
                 all_is_pos.extend(is_pos.tolist())
 
             img_idx += 1
